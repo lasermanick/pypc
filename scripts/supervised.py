@@ -61,12 +61,14 @@ def main(cf):
                 )
 
             if epoch % cf.test_every == 0:
+                print(f"\nTest @ epoch {epoch}")
+                sleep(0.1)
                 acc = 0
                 for _, (img_batch, label_batch) in enumerate(tqdm(test_loader, disable=False)):
                     label_preds = model.test_batch_supervised(img_batch)
                     acc += datasets.accuracy(label_preds, label_batch)
                 metrics["acc"].append(acc / len(test_loader))
-                print("\nTest @ epoch {} / Accuracy: {:.4f}".format(epoch, acc / len(test_loader)))
+                print("\nAccuracy: {:.4f}".format(acc / len(test_loader)))
 
             utils.save_json(metrics, cf.logdir + "metrics.json")
 
@@ -85,8 +87,8 @@ if __name__ == "__main__":
         cf.logdir = f"data/supervised/{seed}/"
 
         # dataset params
-        cf.train_size = None
-        cf.test_size = None
+        cf.train_size = 6000  # None
+        cf.test_size = 1000  # None
         cf.label_scale = None
         cf.normalize = False
 
