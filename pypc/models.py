@@ -5,17 +5,19 @@ from pypc.layers import FCLayer
 
 
 class PCModel(object):
-    def __init__(self, nodes, mu_dt, act_fn, use_bias=False, kaiming_init=False):
+    def __init__(self, nodes, mu_dt, act_fn, use_bias=False, kaiming_init=False, use_precis=False, precis=None):
         """
         Define the Predictive Coding PyTorch model. All layers fully connected. All nodes using the specified activation
         function except for the output layer which is linear. Bias terms are optional. Kaiming weight initialisation is
-        optional.
+        optional. Precisions are optional.
 
         :param nodes: List of number of nodes in each layer
-        :param mu_dt:
+        :param mu_dt: Timestep for updating means
         :param act_fn: Activation function
         :param use_bias: Include bias terms?
         :param kaiming_init: Use Kaiming weight initialisation?
+        :param use_precis: Use precisions? (If False, precisions are implied to be identity matrices)
+        :param precis: List of precision scaling per node layer
         """
         self.nodes = nodes
         self.mu_dt = mu_dt
@@ -35,6 +37,14 @@ class PCModel(object):
                 kaiming_init=kaiming_init,
             )
             self.layers.append(layer)
+
+        self.use_precis = use_precis
+        # If precisions used, create list of diagonal precision matrices with given scale factor
+        # NOTE: Precisions are fixed, so can be defined here. Not suitable for dynamic (learned) precisions
+        if self.use_precis:
+            self.precis = [[] for _ in range(self.n_nodes)]
+            for n in range(self.n_nodes):
+                self.precis[n] = utils.set_tensor(torch.diagflat(precis[n]*torch.ones(nodes[n])))
 
     def reset(self):
         """
@@ -130,9 +140,12 @@ class PCModel(object):
         :param fixed_preds: Fix predictions at initial values?
         """
         # For batch, initialise predictions and errors for all nodes except inputs
+        # Optionally, errors are precision scaled
         for n in range(1, self.n_nodes):
             self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
             self.errs[n] = self.mus[n] - self.preds[n]
+            if self.use_precis:
+                self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
         # For each training iteration
         for itr in range(n_iters):
@@ -142,10 +155,13 @@ class PCModel(object):
                 self.mus[l] = self.mus[l] + self.mu_dt * delta
 
             # For batch, update errors and (optionally) predictions for all nodes except inputs
+            # Optionally, errors are precision scaled
             for n in range(1, self.n_nodes):
                 if not fixed_preds:
                     self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
                 self.errs[n] = self.mus[n] - self.preds[n]
+                if self.use_precis:
+                    self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
     def test_updates(self, n_iters, fixed_preds):
         """
@@ -155,9 +171,12 @@ class PCModel(object):
         :param fixed_preds: Fix predictions at initial values?
         """
         # For batch, initialise predictions and errors for all nodes except inputs
+        # Optionally, errors are precision scaled
         for n in range(1, self.n_nodes):
             self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
             self.errs[n] = self.mus[n] - self.preds[n]
+            if self.use_precis:
+                self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
         # For each test iteration
         for itr in range(n_iters):
@@ -167,10 +186,14 @@ class PCModel(object):
                 delta = self.layers[l].backward(self.errs[l + 1]) - self.errs[l]
                 self.mus[l] = self.mus[l] + self.mu_dt * delta
 
+            # For batch, update errors and (optionally) predictions for all nodes except inputs
+            # Optionally, errors are precision scaled
             for n in range(1, self.n_nodes):
                 if not fixed_preds:
                     self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
                 self.errs[n] = self.mus[n] - self.preds[n]
+                if self.use_precis:
+                    self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
     def update_grads(self):
         """

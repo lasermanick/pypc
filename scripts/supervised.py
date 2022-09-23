@@ -31,6 +31,8 @@ def main(cf):
         act_fn=cf.act_fn,
         use_bias=cf.use_bias,
         kaiming_init=cf.kaiming_init,
+        use_precis=cf.use_precis,
+        precis=cf.precis,
     )
     optimizer = optim.get_optim(
         model.params,
@@ -106,5 +108,7 @@ if __name__ == "__main__":
         cf.kaiming_init = True  # False
         cf.nodes = [784, 300, 100, 10]
         cf.act_fn = utils.ReLU()
+        cf.use_precis = False
+        cf.precis = [1.0, 1.0, 1.0, 1.0]
 
         main(cf)

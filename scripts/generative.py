@@ -32,6 +32,8 @@ def main(cf):
         act_fn=cf.act_fn,
         use_bias=cf.use_bias,
         kaiming_init=cf.kaiming_init,
+        use_precis=cf.use_precis,
+        precis=cf.precis,
     )
     optimizer = optim.get_optim(
         model.params,
@@ -86,7 +88,7 @@ if __name__ == "__main__":
 
         # experiment params
         cf.seed = seed
-        cf.n_epochs = 2  # 20
+        cf.n_epochs = 20  # 20
         cf.test_every = 1
         cf.logdir = f"data/generative/{seed}/"
         cf.imgdir = cf.logdir + "imgs/"
@@ -118,5 +120,7 @@ if __name__ == "__main__":
         cf.kaiming_init = False
         cf.nodes = [10, 100, 300, 784]
         cf.act_fn = utils.Tanh()
+        cf.use_precis = False
+        cf.precis = [1.0, 1.0, 1.0, 1.0]
 
         main(cf)
