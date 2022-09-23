@@ -163,7 +163,7 @@ class PCModel(object):
                 if self.use_precis:
                     self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
-    def test_updates(self, n_iters, fixed_preds):
+    def test_updates(self, n_iters, fixed_preds=False):
         """
         Test model
 
