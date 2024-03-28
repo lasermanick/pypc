@@ -3,11 +3,11 @@ import torch
 
 
 def get_optim(params, optim_id, lr, q_lr=None, batch_scale=True, grad_clip=None, weight_decay=None):
-    if optim_id is "Adam":
+    if optim_id == "Adam":
         return Adam(
             params, lr=lr, q_lr=q_lr, batch_scale=batch_scale, grad_clip=grad_clip, weight_decay=weight_decay
         )
-    elif optim_id is "SGD":
+    elif optim_id == "SGD":
         return SGD(
             params, lr=lr, q_lr=q_lr, batch_scale=batch_scale, grad_clip=grad_clip, weight_decay=weight_decay
         )
