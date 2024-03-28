@@ -1,11 +1,12 @@
 import torch
+import numpy as np
 
 from pypc import utils
 from pypc.layers import FCLayer
 
 
 class PCModel(object):
-    def __init__(self, nodes, mu_dt, act_fn, use_bias=False, kaiming_init=False, use_precis=False, precis=None):
+    def __init__(self, nodes, mu_dt, act_fn, use_bias=False, kaiming_init=False, use_precis=False, precis_factor=None, precis_coverage=None, precis_per_pixel=None, run_log=None, log_node_its=False):
         """
         Define the Predictive Coding PyTorch model. All layers fully connected. All nodes using the specified activation
         function except for the output layer which is linear. Bias terms are optional. Kaiming weight initialisation is
@@ -17,8 +18,12 @@ class PCModel(object):
         :param use_bias: Include bias terms?
         :param kaiming_init: Use Kaiming weight initialisation?
         :param use_precis: Use precisions? (If False, precisions are implied to be identity matrices)
-        :param precis: List of precision scaling per node layer
+        :param precis_factor: List of precision scaling per node layer
+        :param precis_coverage: List of precision coverage by node layer or None for full coverage
+        :param run_log: A neptune.ai run object or None if logging not required
+        :param log_node_its: Log stats after every node update iteration? (WARNING: Slow!)
         """
+
         self.nodes = nodes
         self.mu_dt = mu_dt
 
@@ -39,12 +44,33 @@ class PCModel(object):
             self.layers.append(layer)
 
         self.use_precis = use_precis
-        # If precisions used, create list of diagonal precision matrices with given scale factor
+        self.precis_coverage = precis_coverage
+        # If precisions used, create:
+        #   List of diagonal precision matrices with given scale factor
+        #   List of diagonal variance matrices (inverse of precision matrices) (easy for diagonal precision)
+        #   List of variance determinants (for free energy sum)
         # NOTE: Precisions are fixed, so can be defined here. Not suitable for dynamic (learned) precisions
         if self.use_precis:
             self.precis = [[] for _ in range(self.n_nodes)]
+            # self.varis = [[] for _ in range(self.n_nodes)]
+            # self.vari_dets = [1.0 for _ in range(self.n_nodes)]
             for n in range(self.n_nodes):
-                self.precis[n] = utils.set_tensor(torch.diagflat(precis[n]*torch.ones(nodes[n])))
+                if (n == self.n_nodes - 1) and precis_per_pixel is not None:
+                    temp = precis_per_pixel.flatten()
+                else:
+                    temp = precis_factor[n] * torch.ones(nodes[n])
+                if self.precis_coverage is not None:
+                    coverage = max(0.0, min(1.0, self.precis_coverage[n]))  # Clamp to range [0, 1]
+                    first_scaled_precision = int(self.nodes[n] * (1.0 - coverage))
+                    temp[0:first_scaled_precision] = torch.ones(first_scaled_precision)
+                self.precis[n] = utils.set_tensor(torch.diagflat(temp))
+                # TODO: Need to rework below to account for precision coverage
+                # self.varis[n] = utils.set_tensor(torch.diagflat((1.0/precis_factor[n])*torch.ones(nodes[n])))
+                # self.vari_dets[n] = (1.0/precis_factor[n])**nodes[n]
+                # self.loggy = np.log(2.0*np.pi*self.vari_dets[n])
+
+        self.run_log = run_log
+        self.log_node_its = log_node_its
 
     def reset(self):
         """
@@ -53,8 +79,15 @@ class PCModel(object):
         self.preds = [[] for _ in range(self.n_nodes)]
         self.errs = [[] for _ in range(self.n_nodes)]
         self.mus = [[] for _ in range(self.n_nodes)]
+        self.free_energy = [0.0 for _ in range(self.n_nodes)]
 
     def reset_mus(self, batch_size, init_std):
+        """
+        For each layer, initialise variational means (mus) to be normally distributed with mean=0
+
+        :param batch_size: Number of samples in current batch
+        :param init_std: Initial standard deviation of mus
+        """
         for l in range(self.n_layers):
             self.mus[l] = utils.set_tensor(
                 torch.empty(batch_size, self.layers[l].in_size).normal_(mean=0, std=init_std)
@@ -104,7 +137,13 @@ class PCModel(object):
         self.train_updates(n_iters, fixed_preds=fixed_preds)  # Iteratively update mus, predictions and errors
         self.update_grads()  # Calculate gradients of weights and biases for all layers
 
-    def train_batch_generative(self, img_batch, label_batch, n_iters, fixed_preds=False):
+    # def set_precisions_by_per_pixel_variance(self, img_batch):
+    #     per_pixel_variance = img_batch.var(dim=0)
+    #     # per_pixel_precision = 1.0 / (per_pixel_variance + 1e-1)
+    #     per_pixel_precision = 1.0 / per_pixel_variance.clamp(min=0.1)
+    #     self.precis[3] = torch.diagflat(per_pixel_precision)
+
+    def train_batch_generative(self, img_batch, label_batch, n_iters, fixed_preds=False, log_batch=False):
         """
         Train the model using the (mini)batch labels as inputs and images as targets
         (Identical to train_batch_supervised() but inputs and targets are swapped)
@@ -118,21 +157,46 @@ class PCModel(object):
         self.set_input(label_batch)  # Set the model inputs, mus[0], equal to the training *labels*
         self.propagate_mu()  # Perform forward pass, update mus for all nodes except inputs and targets
         self.set_target(img_batch)  # Set the model outputs (targets), mus[-1], equal to the training *images*
-        self.train_updates(n_iters, fixed_preds=fixed_preds)  # Iteratively update mus, predictions and errors
+        self.train_updates(n_iters, fixed_preds=fixed_preds, log_batch=log_batch)  # Iteratively update mus, predictions and errors
         self.update_grads()  # Calculate gradients of weights and biases for all layers
+        if self.run_log and log_batch:
+            self.log_layer_stats(prefix="train")
+
+    def log_layer_stats(self, prefix="layer"):
+        for l in range(self.n_layers):
+            self.run_log[f"{prefix}/grad_weight_mean_{l}]"].log(torch.mean(self.layers[l].grad["weights"]))
+            self.run_log[f"{prefix}/grad_bias_mean_{l}]"].log(torch.mean(self.layers[l].grad["bias"]))
+            self.run_log[f"{prefix}/grad_weight_std_{l}]"].log(torch.std(self.layers[l].grad["weights"]))
+            self.run_log[f"{prefix}/grad_bias_std_{l}]"].log(torch.std(self.layers[l].grad["bias"]))
+            self.run_log[f"{prefix}/weight_mean_{l}]"].log(torch.mean(self.layers[l].weights))
+            self.run_log[f"{prefix}/bias_mean_{l}]"].log(torch.mean(self.layers[l].bias))
+            self.run_log[f"{prefix}/weight_std_{l}]"].log(torch.std(self.layers[l].weights))
+            self.run_log[f"{prefix}/bias_std_{l}]"].log(torch.std(self.layers[l].bias))
+
+    def log_node_stats(self, prefix="node"):
+        for n in range(1, self.n_nodes):
+            self.run_log[f"{prefix}/err_mean_{n}]"].log(torch.mean(self.errs[n]))
+            self.run_log[f"{prefix}/pred_mean_{n}"].log(torch.mean(self.preds[n]))
+            self.run_log[f"{prefix}/mu_mean_{n}"].log(torch.mean(self.mus[n]))
+            self.run_log[f"{prefix}/err_std_{n}]"].log(torch.std(self.errs[n]))
+            self.run_log[f"{prefix}/pred_std_{n}"].log(torch.std(self.preds[n]))
+            self.run_log[f"{prefix}/mu_std_{n}"].log(torch.std(self.mus[n]))
+            self.run_log[f"{prefix}/free_e_{n}"].log(self.free_energy[n])
+        self.run_log[f"{prefix}/free_e"].log(sum(self.free_energy))
 
     def test_batch_supervised(self, img_batch):
         return self.forward(img_batch)
 
-    def test_batch_generative(self, img_batch, n_iters, init_std=0.05, fixed_preds=False):
+    def test_batch_generative(self, img_batch, n_iters, init_std=0.05, fixed_preds=False, log_batch=False):
         batch_size = img_batch.size(0)
-        self.reset()
-        self.reset_mus(batch_size, init_std)
-        self.set_target(img_batch)
-        self.test_updates(n_iters, fixed_preds=fixed_preds)
+        self.reset()  # Initialise the prediction, error, and mu data structures
+        self.reset_mus(batch_size, init_std)  # Initialise variational means (mus)
+        self.set_target(img_batch)  # Set output node mus for batch to target values (test images)
+        self.test_updates(n_iters, fixed_preds=fixed_preds, log_batch=log_batch)
+        # self.update_grads()  # Calculate gradients of weights and biases for all layers - NOT REQUIRED
         return self.mus[0]
 
-    def train_updates(self, n_iters, fixed_preds=False):
+    def train_updates(self, n_iters, fixed_preds=False, log_batch=False):
         """
         Iteratively update mus, predictions and errors
 
@@ -140,30 +204,40 @@ class PCModel(object):
         :param fixed_preds: Fix predictions at initial values?
         """
         # For batch, initialise predictions and errors for all nodes except inputs
-        # Optionally, errors are precision scaled
+        # Optionally, errors are precision scaled and free energy is calculated
         for n in range(1, self.n_nodes):
             self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
             self.errs[n] = self.mus[n] - self.preds[n]
             if self.use_precis:
+                self.free_energy[n] = torch.mean(self.errs[n] @ self.precis[n] @ self.errs[n].T).item()
                 self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
+
+        # Log values to neptune
+        if self.run_log and log_batch and self.log_node_its:
+            self.log_node_stats(prefix="train")
 
         # For each training iteration
         for itr in range(n_iters):
-            # For batch, update mus for all nodes except inputs and outputs
+            # For batch, update mus for all nodes except inputs (labels) and outputs (images)
             for l in range(1, self.n_layers):
                 delta = self.layers[l].backward(self.errs[l + 1]) - self.errs[l]
                 self.mus[l] = self.mus[l] + self.mu_dt * delta
 
             # For batch, update errors and (optionally) predictions for all nodes except inputs
-            # Optionally, errors are precision scaled
+            # Optionally, errors are precision scaled and free energy is calculated
             for n in range(1, self.n_nodes):
                 if not fixed_preds:
                     self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
                 self.errs[n] = self.mus[n] - self.preds[n]
                 if self.use_precis:
+                    self.free_energy[n] = torch.mean(self.errs[n] @ self.precis[n] @ self.errs[n].T).item()
                     self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
 
-    def test_updates(self, n_iters, fixed_preds=False):
+            # Log values to neptune
+            if self.run_log and log_batch and (self.log_node_its or (itr == n_iters-1)):
+                self.log_node_stats(prefix="train")
+
+    def test_updates(self, n_iters, fixed_preds=False, log_batch=False):
         """
         Test model
 
@@ -171,15 +245,22 @@ class PCModel(object):
         :param fixed_preds: Fix predictions at initial values?
         """
         # For batch, initialise predictions and errors for all nodes except inputs
-        # Optionally, errors are precision scaled
+        # Optionally, errors are precision scaled and free energy is calculated
         for n in range(1, self.n_nodes):
             self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
             self.errs[n] = self.mus[n] - self.preds[n]
             if self.use_precis:
+                self.free_energy[n] = torch.mean(self.errs[n] @ self.precis[n] @ self.errs[n].T).item()
                 self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
+
+        # Log values to neptune
+        if self.run_log and log_batch and self.log_node_its:
+            self.log_node_stats(prefix="test")
 
         # For each test iteration
         for itr in range(n_iters):
+            # For batch, update mus for all nodes except outputs (images)
+            # NOTE: Unlike training which also does not update inputs (labels)
             delta = self.layers[0].backward(self.errs[1])
             self.mus[0] = self.mus[0] + self.mu_dt * delta
             for l in range(1, self.n_layers):
@@ -187,13 +268,18 @@ class PCModel(object):
                 self.mus[l] = self.mus[l] + self.mu_dt * delta
 
             # For batch, update errors and (optionally) predictions for all nodes except inputs
-            # Optionally, errors are precision scaled
+            # Optionally, errors are precision scaled and free energy is calculated
             for n in range(1, self.n_nodes):
                 if not fixed_preds:
                     self.preds[n] = self.layers[n - 1].forward(self.mus[n - 1])
                 self.errs[n] = self.mus[n] - self.preds[n]
                 if self.use_precis:
+                    self.free_energy[n] = torch.mean(self.errs[n] @ self.precis[n] @ self.errs[n].T).item()
                     self.errs[n] = torch.matmul(self.errs[n], self.precis[n])
+
+            # Log values to neptune
+            if self.run_log and log_batch and (self.log_node_its or (itr == n_iters-1)):
+                self.log_node_stats(prefix="test")
 
     def update_grads(self):
         """
@@ -221,4 +307,3 @@ class PCModel(object):
         :return: Model layers
         """
         return self.layers
-
