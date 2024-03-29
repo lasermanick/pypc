@@ -1,6 +1,6 @@
 name: pypc
 channels:
-  - pytorch
+  - pytorch-nightly
   - nvidia
   - conda-forge
   - defaults
