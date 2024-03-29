@@ -2,3 +2,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 data/
+/scripts/.neptune/
+/runs/
+/pypc/figs/
+/pypc/.neptune
+.idea/
+/pypc/constants.py
+/pypc/PyTorch_HelloWorld.py
+/pypc/PyTorch_MNIST_Example.py
+/pypc/temp.py
+/tensorboard_test.py
