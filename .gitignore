@@ -12,3 +12,4 @@ data/
 /pypc/PyTorch_MNIST_Example.py
 /pypc/temp.py
 /tensorboard_test.py
+.DS_Store
