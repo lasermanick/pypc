@@ -86,6 +86,7 @@ def print_batch_stats(img_batch, cf):
 
 def main(cf):
     print(f"\nStarting generative experiment {cf.logdir}: --seed {cf.seed} --device {utils.DEVICE}")
+    print(datetime.now())
     os.makedirs(cf.logdir, exist_ok=True)
     os.makedirs(cf.imgdir, exist_ok=True)
     os.makedirs(cf.preddir, exist_ok=True)
@@ -216,7 +217,7 @@ if __name__ == "__main__":
                 # logging params
                 cf.log_node_its = False  # WARNING: Can log A LOT of data to Neptune if True
                 cf.json_enabled = True
-                cf.neptune_enabled = True
+                cf.neptune_enabled = False
                 cf.neptune_mode = "async"  # https://docs.neptune.ai/api/connection_modes/
                 cf.neptune_project = "lasermanick/PYPC"
                 cf.neptune_api_token = constants.API_KEY_NEPTUNE
@@ -279,3 +280,5 @@ if __name__ == "__main__":
                 cf.fixed_preds_test = False
 
                 main(cf)
+print("Finishing experiment")
+print(datetime.now())
